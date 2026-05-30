@@ -2,338 +2,173 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8" />
-<title>AI 问答助手</title>
+<title>文档问答机器人</title>
 <style>
-* {
-  margin: 0;
-  padding: 0;
-  box-sizing: border-box;
-}
-body {
-  font-family: "Microsoft YaHei", sans-serif;
-  display: flex;
-  height: 100vh;
-  overflow: hidden;
-}
-
-/* ---------- 侧边栏 ---------- */
-.sidebar {
-  width: 260px;
-  background: #202123;
-  color: #fff;
-  display: flex;
-  flex-direction: column;
-}
-.sidebar-header {
-  padding: 16px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  border-bottom: 1px solid #444;
-}
-.new-chat-btn {
-  background: #343541;
-  color: #fff;
-  border: 1px solid #565869;
-  padding: 8px 12px;
-  border-radius: 6px;
-  cursor: pointer;
-}
-.new-chat-btn:hover {
-  background: #40414f;
-}
-.history-list {
-  flex: 1;
-  overflow-y: auto;
-  padding: 8px;
-}
-.history-item {
-  padding: 10px 12px;
-  border-radius: 6px;
-  margin-bottom: 4px;
-  cursor: pointer;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.history-item:hover {
-  background: #2a2b32;
-}
-.history-item.active {
-  background: #343541;
-}
-
-/* ---------- 主聊天区 ---------- */
-.main {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  background: #f7f7f8;
-}
-.chat-container {
-  flex: 1;
-  padding: 20px;
-  overflow-y: auto;
-}
-.message {
-  max-width: 75%;
-  margin-bottom: 16px;
-  line-height: 1.6;
-}
-.user {
-  margin-left: auto;
-  background: #0b76ef;
-  color: #fff;
-  padding: 12px 16px;
-  border-radius: 12px 12px 0 12px;
-}
-.ai {
-  margin-right: auto;
-  background: #e5e5ea;
-  color: #333;
-  padding: 12px 16px;
-  border-radius: 12px 12px 12px 0;
-}
-.input-area {
-  display: flex;
-  padding: 12px;
-  border-top: 1px solid #ddd;
-  background: #fff;
-}
-#query-input {
-  flex: 1;
-  border: 1px solid #ccc;
-  border-radius: 20px;
-  padding: 10px 16px;
-  outline: none;
-  font-size: 15px;
-}
-#send-btn {
-  margin-left: 10px;
-  border: none;
-  background: #0b76ef;
-  color: #fff;
-  padding: 10px 16px;
-  border-radius: 20px;
-  cursor: pointer;
-}
-#send-btn:disabled {
-  background: #74b0f5;
-}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:Microsoft YaHei,sans-serif;display:flex;height:100vh;overflow:hidden}
+.sidebar{width:260px;background:#202123;color:#fff;display:flex;flex-direction:column}
+.sidebar-header{padding:16px;display:flex;flex-direction:column;gap:10px;border-bottom:1px solid #444}
+.sidebar-top{display:flex;justify-content:space-between;align-items:center}
+.btn{background:#343541;color:#fff;border:1px solid #565869;padding:8px 12px;border-radius:6px;cursor:pointer}
+.btn:hover{background:#40414f}
+#fileInput{display:none}
+.history-list{flex:1;overflow-y:auto;padding:8px}
+.history-item{padding:10px 12px;border-radius:6px;margin-bottom:4px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.history-item:hover{background:#2a2b32}
+.history-item.active{background:#343541}
+.main{flex:1;display:flex;flex-direction:column;background:#f7f7f8}
+.chat-container{flex:1;padding:20px;overflow-y:auto}
+.message{max-width:75%;margin-bottom:16px;line-height:1.6}
+.user{margin-left:auto;background:#0b76ef;color:#fff;padding:12px 16px;border-radius:12px 12px 0 12px}
+.ai{margin-right:auto;background:#e5e5ea;color:#333;padding:12px 16px;border-radius:12px 12px 12px 0}
+.input-area{display:flex;padding:12px;border-top:1px solid #ddd;background:#fff}
+#query-input{flex:1;border:1px solid #ccc;border-radius:20px;padding:10px 16px;outline:none;font-size:15px}
+#send-btn{margin-left:10px;border:none;background:#0b76ef;color:#fff;padding:10px 16px;border-radius:20px;cursor:pointer}
 </style>
 </head>
 <body>
 
-<!-- 侧边栏 -->
-<div class="sidebar">
+<<div class="sidebar">
   <div class="sidebar-header">
-    <span>历史对话</span>
-    <button class="new-chat-btn">+ 新对话</button>
+    <div class="sidebar-top">
+      <span>历史对话</span>
+      <button class="btn" id="newChatBtn">+ 新对话</button>
+    </div>
+    <button class="btn" id="uploadBtn">+ 知识库</button>
+    <input type="file" id="fileInput" accept=".txt,.md,.pdf,.docx,.xlsx">
   </div>
   <div class="history-list" id="history-list"></div>
 </div>
 
-<!-- 主聊天区 -->
 <div class="main">
   <div class="chat-container" id="chat-container"></div>
   <div class="input-area">
-    <input type="text" id="query-input" placeholder="输入问题..." />
+    <input type="text" id="query-input" placeholder="发送消息...">
     <button id="send-btn">发送</button>
   </div>
 </div>
 
 <script>
-// ========== 会话管理（本地存储） ==========
 const STORAGE_KEY = "chat_sessions";
 let sessions = [];
-let currentSessionId = null;
+let currentSessionId = "default";
 
-// 生成唯一ID
-function uuid() {
-  return crypto.randomUUID();
+function uuid(){return crypto.randomUUID()}
+
+// 会话管理
+function loadSessions(){
+  const raw=localStorage.getItem(STORAGE_KEY);
+  if(!raw){sessions=[{id:"default",title:"新对话",messages:[]}]}else{sessions=JSON.parse(raw)}
+  currentSessionId=sessions[0].id;renderHistory();loadChat(currentSessionId)
 }
 
-// 从本地加载会话
-function loadSessions() {
-  const raw = localStorage.getItem(STORAGE_KEY);
-  if (!raw) {
-    const first = createSession();
-    sessions = [first];
-  } else {
-    sessions = JSON.parse(raw);
-  }
-  currentSessionId = sessions[0].id;
-  renderHistoryList();
-  loadChat(currentSessionId);
+function renderHistory(){
+  const el=document.getElementById("history-list");el.innerHTML="";
+  sessions.forEach(s=>{
+    const item=document.createElement("div");
+    item.className="history-item"+(s.id===currentSessionId?" active":"");
+    item.textContent=s.title;
+    item.onclick=()=>{currentSessionId=s.id;renderHistory();loadChat(currentSessionId)}
+    el.appendChild(item)
+  })
 }
 
-// 创建新会话
-function createSession(title = "新对话") {
-  return {
-    id: uuid(),
-    title,
-    messages: [
-      { role: "system", content: "你是一个严谨的智能问答助手。" }
-    ]
-  };
+function loadChat(id){
+  const s=sessions.find(x=>x.id===id);
+  const c=document.getElementById("chat-container");c.innerHTML="";
+  s.messages.forEach(m=>{if(m.role!=="system")addMsg(m.content,m.role==="user"?"user":"ai")})
 }
 
-// 保存会话到本地
-function saveSessions() {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(sessions));
+function addMsg(text,role){
+  const d=document.createElement("div");d.className="message "+role;d.textContent=text;
+  document.getElementById("chat-container").appendChild(d);
+  document.getElementById("chat-container").scrollTop = document.getElementById("chat-container").scrollHeight;
 }
 
-// 渲染侧边栏历史列表
-function renderHistoryList() {
-  const listEl = document.getElementById("history-list");
-  listEl.innerHTML = "";
-  sessions.forEach(sess => {
-    const item = document.createElement("div");
-    item.className = "history-item" + (sess.id === currentSessionId ? " active" : "");
-    item.textContent = sess.title;
-    item.addEventListener("click", () => {
-      currentSessionId = sess.id;
-      renderHistoryList();
-      loadChat(currentSessionId);
-    });
-    listEl.appendChild(item);
-  });
-}
-
-// 加载某个会话的聊天到界面
-function loadChat(sessionId) {
-  const sess = sessions.find(s => s.id === sessionId);
-  if (!sess) return;
-  const container = document.getElementById("chat-container");
-  container.innerHTML = "";
-  // 只渲染 user 和 ai，跳过 system
-  sess.messages.forEach(msg => {
-    if (msg.role === "system") return;
-    addMessageToUI(msg.content, msg.role === "user" ? "user" : "ai");
-  });
-}
-
-// 更新当前会话的标题（用第一个问题）
-function updateSessionTitle(sessionId, firstQuery) {
-  const sess = sessions.find(s => s.id === sessionId);
-  if (!sess) return;
-  // 只在标题是“新对话”时更新
-  if (sess.title === "新对话") {
-    sess.title = firstQuery.length > 20 ? firstQuery.slice(0, 20) + "..." : firstQuery;
-    saveSessions();
-    renderHistoryList();
+// 上传文档到知识库（当前会话的知识库）
+async function uploadFile(){
+  const file=document.getElementById("fileInput").files[0];
+  if(!file){alert("请选择文件");return}
+  const fd=new FormData();
+  fd.append("file",file);
+  fd.append("kb_id",currentSessionId); // 每个会话独立知识库
+  try{
+    const r=await fetch("http://127.0.0.1:8000/api/upload",{method:"POST",body:fd});
+    const data=await r.json();
+    alert(data.status==="ok"?"上传成功，已生成知识库":"上传失败："+data.msg)
+  }catch(e){
+    alert("上传出错："+e.message)
   }
 }
 
-// ========== 聊天界面 ==========
-const chatContainer = document.getElementById("chat-container");
-const queryInput = document.getElementById("query-input");
-const sendBtn = document.getElementById("send-btn");
+// 发送聊天
+async function send(){
+  const q=document.getElementById("query-input").value.trim();
+  if(!q)return;
+  const s=sessions.find(x=>x.id===currentSessionId);
+  s.messages.push({role:"user",content:q});
+  addMsg(q,"user");
+  document.getElementById("query-input").value="";
 
-function addMessageToUI(text, role) {
-  const div = document.createElement("div");
-  div.className = "message " + role;
-  div.textContent = text;
-  chatContainer.appendChild(div);
-  chatContainer.scrollTop = chatContainer.scrollHeight;
-}
+  const hist=s.messages.filter(m=>m.role!=="system").map(m=>({role:m.role,content:m.content}));
 
-// ========== 发送消息（流式，已修复data:前缀问题） ==========
-async function sendMessage() {
-  const query = queryInput.value.trim();
-  if (!query) return;
+  const res=await fetch("http://127.0.0.1:8000/api/chat/stream",{
+    method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({
+      query:q,
+      history:hist,
+      kb_id:currentSessionId
+    })
+  })
 
-  const currentSession = sessions.find(s => s.id === currentSessionId);
-  if (!currentSession) return;
+  const reader=res.body.getReader();
+  const dec=new TextDecoder();
+  let buf="";
+  const aiDiv=document.createElement("div");
+  aiDiv.className="message ai";
+  document.getElementById("chat-container").appendChild(aiDiv);
 
-  // 用户消息加入会话
-  currentSession.messages.push({ role: "user", content: query });
-  addMessageToUI(query, "user");
-
-  // 更新标题（第一次提问）
-  if (currentSession.messages.length === 2) {
-    updateSessionTitle(currentSessionId, query);
-  }
-
-  queryInput.value = "";
-  sendBtn.disabled = true;
-
-  // 准备 history（去掉 system）
-  const history = currentSession.messages
-    .filter(m => m.role !== "system")
-    .map(m => ({ role: m.role, content: m.content }));
-
-  try {
-    const response = await fetch("http://127.0.0.1:8000/api/chat/stream", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        query: query,
-        history: history,
-        system_prompt: "你是一个严谨的智能问答助手。",
-        context: ""
-      })
-    });
-
-    if (!response.body) throw new Error("不支持流式响应");
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder("utf-8");
-
-    // AI 回复占位
-    let aiText = "";
-    const aiDiv = document.createElement("div");
-    aiDiv.className = "message ai";
-    chatContainer.appendChild(aiDiv);
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      const chunk = decoder.decode(value, { stream: true });
-      
-      // 关键修复：逐行解析，只取 data: 后面的内容，并且过滤空行
-      const lines = chunk.split('\n');
-      for (const line of lines) {
-        if (line.startsWith('data: ')) {
-          const text = line.replace('data: ', '').trim();
-          if (text) {
-            aiText += text;
-            aiDiv.textContent = aiText;
-            chatContainer.scrollTop = chatContainer.scrollHeight;
-          }
-        }
+  while(true){
+    const {done,value}=await reader.read();
+    if(done)break;
+    const chunk=dec.decode(value);
+    const lines=chunk.split("\n");
+    for(const line of lines){
+      if(line.startsWith("data: ")){
+        const t=line.replace("data: ","").trim();
+        if(t){buf+=t;aiDiv.textContent=buf;}
       }
     }
-
-    // 把完整 AI 回复存进会话
-    currentSession.messages.push({ role: "assistant", content: aiText });
-    saveSessions();
-
-  } catch (err) {
-    addMessageToUI("出错了：" + err.message, "ai");
-  } finally {
-    sendBtn.disabled = false;
+    document.getElementById("chat-container").scrollTop = document.getElementById("chat-container").scrollHeight;
   }
+  s.messages.push({role:"assistant",content:buf});
+  if(s.title==="新对话"){
+    s.title=q.length>20?q.slice(0,20)+"...":q;
+  }
+  localStorage.setItem(STORAGE_KEY,JSON.stringify(sessions));
+  renderHistory();
 }
 
-// ========== 绑定事件 ==========
-sendBtn.addEventListener("click", sendMessage);
-queryInput.addEventListener("keydown", e => {
-  if (e.key === "Enter") sendMessage();
-});
+// 绑定事件
+document.getElementById("send-btn").onclick=send;
+document.getElementById("query-input").onkeydown=e=>e.key==="Enter"&&send();
 
-// 新对话按钮
-document.querySelector(".new-chat-btn").addEventListener("click", () => {
-  const newSess = createSession();
-  sessions.unshift(newSess); // 放最前面
-  currentSessionId = newSess.id;
-  saveSessions();
-  renderHistoryList();
+document.getElementById("newChatBtn").onclick=()=>{
+  sessions.unshift({id:uuid(),title:"新对话",messages:[]});
+  currentSessionId=sessions[0].id;
+  localStorage.setItem(STORAGE_KEY,JSON.stringify(sessions));
+  renderHistory();
   loadChat(currentSessionId);
-});
+}
+
+document.getElementById("uploadBtn").onclick=()=>{
+  document.getElementById("fileInput").click();
+}
+document.getElementById("fileInput").onchange=uploadFile;
 
 // 初始化
 loadSessions();
 </script>
-
 </body>
 </html>
