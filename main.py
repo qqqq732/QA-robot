@@ -1,5 +1,6 @@
 import os
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional
 from fastapi.responses import StreamingResponse
@@ -9,7 +10,7 @@ from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 # ==========================================
 # 1. 配置大模型
 # ==========================================
-DASHSCOPE_API_KEY = "sk- 省略"
+DASHSCOPE_API_KEY = "sk-9bf45d009d1c487d857aaf54e3a2bbe4"
 
 llm = ChatOpenAI(
     api_key=DASHSCOPE_API_KEY,
@@ -19,6 +20,14 @@ llm = ChatOpenAI(
 )
 
 app = FastAPI(title="智能问答机器人")
+# 解决跨域，让网页能访问接口
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 # ==========================================
