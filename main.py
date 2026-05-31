@@ -32,7 +32,7 @@ os.makedirs("vector_store", exist_ok=True)
 dashscope.api_key = DASHSCOPE_API_KEY
 
 # ==========================================
-# 自定义 Embedding 类（使用 qwen3-vl-embedding）
+# 自定义 Embedding 类（修复可调用问题）
 # ==========================================
 class DashScopeEmbeddings:
     """使用 dashscope 的 qwen3-vl-embedding 模型"""
@@ -64,9 +64,14 @@ class DashScopeEmbeddings:
             print(f"生成 embedding {i+1}/{len(texts)}...")
             embeddings.append(self.embed_query(text))
         return embeddings
+    
+    # 添加 __call__ 方法，使对象可调用（FAISS 需要）
+    def __call__(self, text: str) -> List[float]:
+        """使对象可调用，返回单个文本的 embedding"""
+        return self.embed_query(text)
 
 # ==========================================
-# LLM 配置（使用 dashscope 兼容模式）
+# LLM 配置
 # ==========================================
 llm = ChatOpenAI(
     model="qwen-max",
@@ -103,7 +108,7 @@ class ChatRequest(BaseModel):
     kb_id: Optional[str] = "default"
 
 # ==========================================
-# 简化的文件解析
+# 文件解析
 # ==========================================
 def extract_text_from_file(file_path: str, ext: str) -> str:
     """提取文件文本内容"""
@@ -150,7 +155,6 @@ def create_chunks(text: str, chunk_size: int = 500) -> List[str]:
     if not text:
         return []
     
-    # 使用递归分割器
     text_splitter = RecursiveCharacterTextSplitter(
         chunk_size=chunk_size,
         chunk_overlap=50,
@@ -158,7 +162,6 @@ def create_chunks(text: str, chunk_size: int = 500) -> List[str]:
     )
     
     chunks = text_splitter.split_text(text)
-    # 过滤空块
     chunks = [chunk.strip() for chunk in chunks if chunk and chunk.strip()]
     
     return chunks
@@ -176,14 +179,12 @@ async def upload_file(
     try:
         print(f"\n处理文件: {file.filename}")
         
-        # 验证文件类型
         ext = os.path.splitext(file.filename)[-1].lower()
         allowed = [".txt", ".md", ".pdf", ".docx", ".xlsx"]
         
         if ext not in allowed:
             return {"status": "error", "msg": f"不支持的文件格式: {ext}"}
         
-        # 读取并保存临时文件
         content = await file.read()
         if not content:
             return {"status": "error", "msg": "文件内容为空"}
@@ -192,7 +193,6 @@ async def upload_file(
             tmp.write(content)
             tmp_path = tmp.name
         
-        # 提取文本
         text = extract_text_from_file(tmp_path, ext)
         
         if not text or len(text) < 10:
@@ -200,7 +200,6 @@ async def upload_file(
         
         print(f"提取文本长度: {len(text)}")
         
-        # 创建块
         chunks = create_chunks(text)
         
         if not chunks:
@@ -208,7 +207,6 @@ async def upload_file(
         
         print(f"创建了 {len(chunks)} 个文本块")
         
-        # 创建 Document 对象
         documents = []
         for i, chunk in enumerate(chunks):
             if chunk and len(chunk) > 5:
@@ -220,12 +218,10 @@ async def upload_file(
         if not documents:
             return {"status": "error", "msg": "没有有效的文档内容"}
         
-        # 测试 embedding
         print("测试 embedding 调用...")
         test_result = embedding.embed_query("测试")
         print(f"Embedding 测试成功，向量维度: {len(test_result)}")
         
-        # 创建向量库
         db_path = f"vector_store/{kb_id}"
         os.makedirs(db_path, exist_ok=True)
         
@@ -252,29 +248,37 @@ async def upload_file(
             os.unlink(tmp_path)
 
 # ==========================================
-# 检索上下文
+# 检索上下文（修复加载问题）
 # ==========================================
 def retrieve_context(query: str, kb_id: str = "default") -> str:
     """检索相关上下文"""
     try:
         db_path = f"vector_store/{kb_id}"
         if not os.path.exists(f"{db_path}/index.faiss"):
+            print(f"向量库不存在: {db_path}")
             return ""
         
+        # 加载时使用相同的 embedding 对象
+        print(f"加载向量库: {db_path}")
         vectorstore = FAISS.load_local(
             db_path, 
-            embedding, 
+            embedding,  # 现在 embedding 是可调用的了
             allow_dangerous_deserialization=True
         )
         
         docs = vectorstore.similarity_search(query, k=3)
         
         if docs:
+            print(f"检索到 {len(docs)} 个相关文档")
             return "\n\n".join([doc.page_content for doc in docs])
-        return ""
+        else:
+            print("未检索到相关文档")
+            return ""
     
     except Exception as e:
         print(f"检索失败: {e}")
+        import traceback
+        traceback.print_exc()
         return ""
 
 # ==========================================
@@ -284,6 +288,7 @@ def retrieve_context(query: str, kb_id: str = "default") -> str:
 async def chat_stream(request: ChatRequest):
     async def generate():
         try:
+            print(f"收到问题: {request.query[:50]}...")
             context = retrieve_context(request.query, request.kb_id)
             
             if context:
@@ -291,9 +296,9 @@ async def chat_stream(request: ChatRequest):
 {context}
 
 问题：{request.query}
-请只根据资料回答。"""
+请只根据资料回答，如果资料中没有相关信息，请明确说"未找到相关内容"。"""
             else:
-                system_prompt = f"请回答：{request.query}（当前没有相关文档）"
+                system_prompt = f"请回答：{request.query}（当前知识库中没有相关文档）"
             
             messages = [SystemMessage(content=system_prompt)]
             messages.append(HumanMessage(content=request.query))
@@ -305,6 +310,9 @@ async def chat_stream(request: ChatRequest):
             yield "data: [DONE]\n\n"
         
         except Exception as e:
+            print(f"生成错误: {e}")
+            import traceback
+            traceback.print_exc()
             yield f"data: 错误: {str(e)}\n\n"
     
     return StreamingResponse(generate(), media_type="text/event-stream")
@@ -348,6 +356,16 @@ async def list_knowledge_bases():
                 if os.path.exists(index_file):
                     kbs.append(item)
     return {"knowledge_bases": kbs}
+
+@app.delete("/api/kb/{kb_id}")
+async def delete_knowledge_base(kb_id: str):
+    """删除知识库"""
+    import shutil
+    kb_path = f"vector_store/{kb_id}"
+    if os.path.exists(kb_path):
+        shutil.rmtree(kb_path)
+        return {"status": "ok", "message": f"知识库 {kb_id} 已删除"}
+    return {"status": "error", "message": "知识库不存在"}
 
 if __name__ == "__main__":
     import uvicorn
