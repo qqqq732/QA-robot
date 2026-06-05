@@ -2,6 +2,8 @@ import os
 import json
 import tempfile
 import traceback
+import shutil
+import hashlib
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -18,34 +20,24 @@ import pdfplumber
 from docx import Document as DocxDocument
 import openpyxl
 
+# 导入百炼原生 SDK 组件
 import dashscope
 from dashscope import MultiModalEmbedding, Generation
 
 # 基础配置
 DASHSCOPE_API_KEY = "sk-密钥"
 os.makedirs("vector_store", exist_ok=True)
-
 dashscope.api_key = DASHSCOPE_API_KEY
 
 
-# 自定义 Embedding 类（符合 LangChain 规范的对象）
 class DashScopeEmbeddings:
     def __init__(self, model: str = "qwen3-vl-embedding"):
         self.model = model
 
     def embed_query(self, text: str) -> List[float]:
-        try:
-            resp = MultiModalEmbedding.call(
-                model=self.model,
-                input=[{'text': text}]
-            )
-            if resp.status_code == 200:
-                return resp.output['embeddings'][0]['embedding']
-            else:
-                raise Exception(f"Embedding API 失败: {resp.message}")
-        except Exception as e:
-            print(f"Embedding 错误: {e}")
-            raise
+        resp = MultiModalEmbedding.call(model=self.model, input=[{'text': text}])
+        if resp.status_code == 200: return resp.output['embeddings'][0]['embedding']
+        raise Exception(f"Embedding API 失败: {resp.message}")
 
     def embed_documents(self, texts: List[str]) -> List[List[float]]:
         return [self.embed_query(text) for text in texts]
@@ -54,21 +46,11 @@ class DashScopeEmbeddings:
         return self.embed_query(text)
 
 
-# 初始化实例
 embedding = DashScopeEmbeddings(model="qwen3-vl-embedding")
-
-app = FastAPI(title="智能问答机器人后端API")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+app = FastAPI()
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 
-# 数据模型
 class Message(BaseModel):
     role: str
     content: str
@@ -76,15 +58,17 @@ class Message(BaseModel):
 
 class ChatRequest(BaseModel):
     query: str
-    history: List[Message] = []
-    kb_id: Optional[str] = "default"
+    history: List[Message] = []  # noqa
+    kb_id: Optional[str] = ""
     model_name: Optional[str] = "qwen-max"
 
 
-# 文档解析逻辑
+def get_safe_id(filename: str) -> str:
+    return hashlib.md5(filename.encode('utf-8')).hexdigest()
+
+
 def extract_text_from_file(file_path: str, ext: str) -> str:
     text = ""
-    ext = ext.lower()
     try:
         if ext in [".txt", ".md"]:
             with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
@@ -92,70 +76,60 @@ def extract_text_from_file(file_path: str, ext: str) -> str:
         elif ext == ".pdf":
             with pdfplumber.open(file_path) as pdf:
                 for page in pdf.pages:
-                    page_text = page.extract_text()
-                    if page_text: text += page_text + "\n"
+                    t = page.extract_text()
+                    if t: text += t + "\n"
         elif ext == ".docx":
             doc = DocxDocument(file_path)
-            for para in doc.paragraphs:
-                if para.text: text += para.text + "\n"
+            for para in doc.paragraphs: text += para.text + "\n"
         elif ext == ".xlsx":
             wb = openpyxl.load_workbook(file_path)
-            for sheet in wb.worksheets:
-                for row in sheet.iter_rows(values_only=True):
-                    row_text = " ".join([str(cell) for cell in row if cell is not None])
-                    if row_text.strip(): text += row_text + "\n"
+            for s in wb.worksheets:
+                for row in s.iter_rows(values_only=True):
+                    text += " ".join([str(c) for c in row if c is not None]) + "\n"
     except Exception as e:
-        print(f"解析文件错误: {e}")
+        print(f"解析错误: {e}")
     return text.strip()
 
 
-def create_chunks(text: str):
-    splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
-    return splitter.split_text(text)
-
-
-# 向量检索逻辑
-def retrieve_context(query: str, kb_id: str) -> str:
-    try:
-        db_path = f"vector_store/{kb_id}"
-        if not os.path.exists(f"{db_path}/index.faiss"):
-            return ""
-        vectorstore = FAISS.load_local(db_path, embedding, allow_dangerous_deserialization=True)
-        docs = vectorstore.similarity_search(query, k=3)
-        return "\n\n".join([d.page_content for d in docs])
-    except Exception as e:
-        print(f"检索异常: {e}")
-        return ""
-
-
-# ==========================================
 # API 核心接口
-# ==========================================
 
 @app.post("/api/upload")
-async def upload_file(file: UploadFile = File(...), kb_id: str = Form("default")):
+async def upload_file(file: UploadFile = File(...)):
     tmp_path = None
     try:
-        ext = os.path.splitext(file.filename)[-1].lower()
+        filename = file.filename
+        ext = os.path.splitext(filename)[-1].lower()
         content = await file.read()
+
         with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
             tmp.write(content)
             tmp_path = tmp.name
 
         text = extract_text_from_file(tmp_path, ext)
-        chunks = create_chunks(text)
-        documents = [Document(page_content=c, metadata={"source": file.filename}) for c in chunks]
+        splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
+        chunks = splitter.split_text(text)
 
-        db_path = f"vector_store/{kb_id}"
-        if os.path.exists(f"{db_path}/index.faiss"):
-            vectorstore = FAISS.load_local(db_path, embedding, allow_dangerous_deserialization=True)
-            vectorstore.add_documents(documents)
+        if not chunks: return {"status": "error", "msg": "文档无有效文本"}
+
+        safe_id = get_safe_id(filename)
+        db_path = os.path.join("vector_store", safe_id)
+        os.makedirs(db_path, exist_ok=True)
+
+        with open(os.path.join(db_path, "original_name.txt"), "w", encoding="utf-8") as f:
+            f.write(filename)
+
+        documents = [Document(page_content=c, metadata={"source": filename}) for c in chunks]
+
+        if os.path.exists(os.path.join(db_path, "index.faiss")):
+            vs = FAISS.load_local(db_path, embedding, allow_dangerous_deserialization=True)
+            vs.add_documents(documents)
         else:
-            vectorstore = FAISS.from_documents(documents, embedding)
+            vs = FAISS.from_documents(documents, embedding)
 
-        vectorstore.save_local(db_path)
-        return {"status": "ok", "msg": "上传成功"}
+        vs.save_local(db_path)
+        return {"status": "ok", "kb_id": safe_id, "kb_name": filename}
     except Exception as e:
+        traceback.print_exc()
         return {"status": "error", "msg": str(e)}
     finally:
         if tmp_path and os.path.exists(tmp_path): os.unlink(tmp_path)
@@ -165,43 +139,56 @@ async def upload_file(file: UploadFile = File(...), kb_id: str = Form("default")
 async def chat_stream(request: ChatRequest):
     async def generate():
         try:
-            # 1. 模型纠错：防止多模态模型进入纯文本接口
-            current_model = request.model_name
-            if "-vl-" in current_model.lower():
-                print(f"⚠️ 自动修复：将多模态模型 {current_model} 切换为文本模型 qwen-plus")
-                current_model = "qwen-plus"
+            context_list = []
+            if os.path.exists("vector_store"):
+                for safe_id in os.listdir("vector_store"):
+                    db_path = os.path.join("vector_store", safe_id)
+                    if os.path.isdir(db_path) and os.path.exists(os.path.join(db_path, "index.faiss")):
+                        try:
+                            vs = FAISS.load_local(db_path, embedding, allow_dangerous_deserialization=True)
+                            docs = vs.similarity_search(request.query, k=2)  # 每个文档找最相似的2个片段
+                            for d in docs:
+                                context_list.append(d.page_content)
+                        except Exception as e:
+                            print(f"联合检索单库失败({safe_id}): {e}")
 
-            # 2. 检索上下文
-            context = retrieve_context(request.query, request.kb_id)
-            system_prompt = f"资料：\n{context}\n回答问题：" if context else "你是一个助手。"
+            context = "\n\n".join(context_list)
 
-            messages = [{"role": "system", "content": system_prompt}]
+            system_prompt = (
+                f"你是一个智能助手。请基于以下参考资料回答问题。\n"
+                f"【极其重要】：如果答案包含多个要点，请务必使用‘1.’、‘2.’、‘3.’等序号进行‘分段、分点’回答。每个要点独立成段，多使用换行符分隔开，严禁把所有内容挤在单一长段落里面！\n\n"
+                f"参考资料：\n{context}\n\n"
+                f"当前问题：{request.query}"
+            ) if context else (
+                "你是一个助手。如果回答内容较长，请务必使用换行符（Enter）分成多段，并使用1. 2. 3.分点列出，不要挤在一段里。"
+            )
+
+            api_messages = [{"role": "system", "content": system_prompt}]
             for m in request.history:
-                messages.append({"role": m.role, "content": m.content})
-            messages.append({"role": "user", "content": request.query})
+                api_messages.append({"role": m.role, "content": m.content})
+            api_messages.append({"role": "user", "content": request.query})
 
-            print(f"🚀 正在调度模型: {current_model}")
+            chosen_model = request.model_name
+            if "-vl-" in chosen_model.lower():
+                chosen_model = "qwen-plus"
 
             responses = Generation.call(
-                model=current_model,
-                messages=messages,
+                model=chosen_model,
+                messages=api_messages,
                 result_format='message',
                 stream=True,
                 incremental_output=True
             )
 
-            has_thought_opened = False
-
+            has_thought = False
             for response in responses:
                 if response.status_code == 200:
                     choice = response.output.choices[0]
                     message = getattr(choice, 'message', {})
 
-                    # 🟢 最高防御等级提取内容
                     reasoning = ""
                     content = ""
 
-                    # 提取思考内容（捕获所有潜在的 Key/Attribute 错误）
                     try:
                         reasoning = getattr(message, 'reasoning_content', '')
                     except:
@@ -210,7 +197,6 @@ async def chat_stream(request: ChatRequest):
                         except:
                             reasoning = ""
 
-                    # 提取正文内容
                     try:
                         content = getattr(message, 'content', '')
                     except:
@@ -219,23 +205,19 @@ async def chat_stream(request: ChatRequest):
                         except:
                             content = ""
 
-                    # 发送思考流
                     if reasoning:
-                        if not has_thought_opened:
+                        if not has_thought:
                             yield "data: <think>\n\n"
-                            has_thought_opened = True
+                            has_thought = True
                         yield f"data: {reasoning}\n\n"
-
-                    # 发送正文流
                     if content:
-                        if has_thought_opened:
+                        if has_thought:
                             yield "data: </think>\n\n\n"
-                            has_thought_opened = False
+                            has_thought = False
                         yield f"data: {content}\n\n"
                 else:
                     yield f"data: 错误({response.code}): {response.message}\n\n"
                     break
-
             yield "data: [DONE]\n\n"
         except Exception as e:
             traceback.print_exc()
@@ -248,14 +230,19 @@ async def chat_stream(request: ChatRequest):
 async def list_kb():
     kbs = []
     if os.path.exists("vector_store"):
-        for d in os.listdir("vector_store"):
-            if os.path.isdir(os.path.join("vector_store", d)):
-                kbs.append(d)
+        for safe_id in os.listdir("vector_store"):
+            p = os.path.join("vector_store", safe_id)
+            name_file = os.path.join(p, "original_name.txt")
+            if os.path.isdir(p) and os.path.exists(name_file):
+                with open(name_file, "r", encoding="utf-8") as f:
+                    kbs.append({"id": safe_id, "name": f.read().strip()})
     return {"knowledge_bases": kbs}
 
 
-@app.get("/")
-async def root():
+@app.post("/api/kb/delete")
+async def delete_kb(data: dict):
+    kb_id = data.get("kb_id")
+    shutil.rmtree(os.path.join("vector_store", kb_id), ignore_errors=True)
     return {"status": "ok"}
 
 
