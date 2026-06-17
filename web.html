@@ -63,15 +63,16 @@ body{font-family:Microsoft YaHei,sans-serif;display:flex;height:100vh;overflow:h
     padding: 12px 16px;
     border-radius: 12px 12px 12px 0;
     box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-
-    /* 核心修复：强行保留大模型吐出来的所有换行与空格，防止糊成一团 */
-    white-space: pre-wrap;
 }
+
+.ai p { margin-bottom: 8px; display: block; line-height: 1.6; }
+.ai li { margin-bottom: 4px; line-height: 1.6; }
+.ai ol, .ai ul { margin: 6px 0; padding-left: 1.5em; }
+
+/* 标题样式 */
 .ai h1, .ai h2, .ai h3 { margin-top: 0.8em; margin-bottom: 0.4em; color: #111; }
-.ai p { margin-bottom: 0.8em; display: block; }
-.ai br { display: block; content: ""; margin-top: 6px; } /* 让强制换行也有好看的间距 */
-.ai ul, .ai ol { margin: 0.5em 0; padding-left: 1.5em; }
-.ai li { margin: 0.3em 0; }
+
+/* 行内代码与代码块样式 */
 .ai code { background: #f4f4f4; padding: 0.2em 0.4em; border-radius: 3px; font-family: monospace; font-size: 0.9em; }
 .ai pre { background: #f6f8fa; padding: 1em; border-radius: 6px; overflow-x: auto; margin: 1em 0; }
 .ai pre code { background: none; padding: 0; }
@@ -107,7 +108,6 @@ body{font-family:Microsoft YaHei,sans-serif;display:flex;height:100vh;overflow:h
 <div class="main">
   <div class="chat-container" id="chat-container"></div>
 
-  <!-- 彻底修复：输入框组件复原 -->
   <div class="input-area">
     <input type="text" id="query-input" placeholder="输入消息，回车发送...">
     <button id="send-btn">发送</button>
@@ -269,7 +269,11 @@ async function uploadFile(){
       alert(`上传成功！`);
       await fetchKBList();
     } else { alert("上传失败：" + data.msg); }
-  } catch(e) { alert("上传出错：" + e.message); }
+  } catch(e) {
+    alert("上传出错：" + e.message);
+  } finally {
+    fileInput.value = "";
+  }
 }
 
 async function send(){
@@ -322,20 +326,19 @@ async function send(){
       buffer = lines.pop() || "";
 
       for(const line of lines){
-        // 💡 核心修复：绝对不要对整行做全局 trim()，只判断开头
-        if(!line.startsWith("data: ")) continue;
+        if (!line || !line.startsWith("data: ")) continue;
 
         const dataText = line.substring(6);
         if(dataText === "[DONE]") break;
 
-        // 自动隐藏模型的思考链
+        // 自动过滤纯思考链碎碎念
         if(dataText.startsWith("<think>")) continue;
 
-        // 💡 核心修复：将后端传过来的安全标记完美还原为标准的 Markdown 换行符
+        // 还原真实的换行符
         const realChunk = dataText.replace(/\[BR\]/g, "\n");
         fullContent += realChunk;
 
-        // 实时用 marked.js 渲染 Markdown
+        // 实时渲染
         try {
           contentDiv.innerHTML = marked.parse(fullContent);
           contentDiv.querySelectorAll('pre code').forEach((b) => { hljs.highlightElement(b); });
@@ -345,6 +348,8 @@ async function send(){
 
         document.getElementById("chat-container").scrollTop = document.getElementById("chat-container").scrollHeight;
       }
+
+      await new Promise(resolve => requestAnimationFrame(resolve));
     }
 
     s.messages.push({role:"assistant", content: fullContent});
