@@ -2,6 +2,8 @@ import os
 import tempfile
 import traceback
 import shutil
+import asyncio  
+import numpy as np  
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -15,6 +17,8 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 # 本地多格式文件解析库
 import pdfplumber
+import pypdfium2 as pdfium
+from paddleocr import PaddleOCR
 from docx import Document as DocxDocument
 import openpyxl
 
@@ -64,7 +68,8 @@ class DashScopeEmbeddings:
 embedding = DashScopeEmbeddings(model="text-embedding-v3")
 
 app = FastAPI(title="RAG文档问答后端")
-# 跨域
+
+# 跨域配置
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -89,6 +94,10 @@ class ChatRequest(BaseModel):
     model_name: Optional[str] = "qwen-max"
 
 
+# 初始化 OCR 引擎
+ocr_engine = PaddleOCR(use_textline_orientation=True, lang="ch")
+
+
 # ==========================================
 # 文件解析、文本切块
 # ==========================================
@@ -100,10 +109,43 @@ def extract_text_from_file(file_path: str, ext: str) -> str:
             with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
                 text = f.read()
         elif ext == ".pdf":
-            with pdfplumber.open(file_path) as pdf:
-                for page in pdf.pages:
-                    page_text = page.extract_text()
-                    if page_text: text += page_text + "\n"
+            # 1. 先尝试用 pdfplumber 提取电子文本
+            try:
+                with pdfplumber.open(file_path) as pdf:
+                    for page in pdf.pages:
+                        page_text = page.extract_text()
+                        if page_text:
+                            text += page_text + "\n"
+            except Exception as pdf_err:
+                print(f"pdfplumber 常规解析失败，尝试直接切入 OCR 模式: {pdf_err}")
+
+                if len(text.strip()) < 10:
+                    print("检测到该 PDF 可能是图片扫描件，正在启动本地 OCR 引擎进行强力识别...")
+                    text = ""
+
+                    with pdfium.PdfDocument(file_path) as pdf_render:
+                        for i, page in enumerate(pdf_render):
+                            bitmap = page.render(scale=2)  
+                            pil_img = bitmap.to_pil().convert("RGB")  
+
+                            import cv2
+                            img_np = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+
+                            print(f"--- 正在识别第 {i + 1} 页 ---")
+                            result = ocr_engine.ocr(img_np)
+
+                            if result and result[0]:
+                                page_lines = 0
+                                for line in result[0]:
+                                    text += line[1][0] + " "
+                                    page_lines += 1
+                                print(f"第 {i + 1} 页识别成功，提取到 {page_lines} 行文字。")
+                            else:
+                                print(f"⚠️ 警告：第 {i + 1} 页未识别到任何文字，请检查图片内容是否清晰。")
+                            text += "\n"
+
+                    print(f"💡 本地 OCR 识别成功完成！总字数: {len(text)}")
+
         elif ext == ".docx":
             doc = DocxDocument(file_path)
             for para in doc.paragraphs:
@@ -116,6 +158,7 @@ def extract_text_from_file(file_path: str, ext: str) -> str:
                     if row_text.strip(): text += row_text + "\n"
     except Exception as e:
         print(f"解析文件错误: {e}")
+        traceback.print_exc()
     return text.strip()
 
 
@@ -124,7 +167,6 @@ def create_chunks(text: str):
     return splitter.split_text(text)
 
 
-# 修改：不仅返回文本，同时提取知识库内关联的文件名
 def retrieve_context_with_sources(query: str, kb_id: str) -> Tuple[str, List[str]]:
     try:
         db_path = f"vector_store/{kb_id}"
@@ -142,7 +184,7 @@ def retrieve_context_with_sources(query: str, kb_id: str) -> Tuple[str, List[str
 
 
 # ==========================================
-# 接口
+# 接口实现
 # ==========================================
 @app.post("/api/upload")
 async def upload_file(file: UploadFile = File(...), kb_id: str = Form("default")):
@@ -161,9 +203,10 @@ async def upload_file(file: UploadFile = File(...), kb_id: str = Form("default")
             tmp.write(content)
             tmp_path = tmp.name
 
-        text = extract_text_from_file(tmp_path, ext)
+        text = await asyncio.to_thread(extract_text_from_file, tmp_path, ext)
+
         if not text or len(text) < 10:
-            return {"status": "error", "msg": f"无法提取有效文本"}
+            return {"status": "error", "msg": "无法从文件中提取出足够的有效文本内容"}
 
         chunks = create_chunks(text)
         documents = [Document(page_content=c, metadata={"source": file.filename, "chunk_id": i})
@@ -193,12 +236,6 @@ async def upload_file(file: UploadFile = File(...), kb_id: str = Form("default")
     finally:
         if tmp_path and os.path.exists(tmp_path):
             os.unlink(tmp_path)
-
-
-# 流式对话接口：重构了 Prompt 限制，加入引用规则
-import traceback
-from fastapi.responses import StreamingResponse
-
 
 
 @app.post("/api/chat/stream")
@@ -242,7 +279,8 @@ async def chat_stream(request: ChatRequest):
                 messages.append({"role": m.role, "content": m.content})
             messages.append({"role": "user", "content": request.query})
 
-            responses = Generation.call(
+            responses = await asyncio.to_thread(
+                Generation.call,
                 model=current_model,
                 messages=messages,
                 result_format='message',
@@ -264,16 +302,15 @@ async def chat_stream(request: ChatRequest):
                     except:
                         pass
 
-                    # 💡 核心修复：如果是思考链，加上 <think> 标记发送
                     if reasoning:
-                        # 替换掉文本中的换行符为安全的自定义占位符，防止打乱 SSE 协议
                         safe_reasoning = reasoning.replace("\n", "[BR]")
                         yield f"data: <think>{safe_reasoning}\n\n"
 
-                    # 💡 核心修复：如果是正文，同样把真实换行替换为安全占位符，单行直发
                     if content:
                         safe_content = content.replace("\n", "[BR]")
                         yield f"data: {safe_content}\n\n"
+
+                    await asyncio.sleep(0.01)
                 else:
                     yield f"data: 错误({response.code}): {response.message}\n\n"
                     break
@@ -282,7 +319,6 @@ async def chat_stream(request: ChatRequest):
             traceback.print_exc()
             yield f"data: 错误: {str(e)}\n\n"
 
-    # 💡 核心修复点 3：增加防缓存 Header 响应头，确保不留存“大坝”
     return StreamingResponse(
         generate(),
         media_type="text/event-stream",
@@ -292,6 +328,7 @@ async def chat_stream(request: ChatRequest):
             "X-Accel-Buffering": "no"
         }
     )
+
 
 @app.get("/api/kb/list")
 async def list_kb():
@@ -304,7 +341,6 @@ async def list_kb():
     return {"knowledge_bases": kbs}
 
 
-# 彻底删除某一个知识库文件夹的接口
 @app.delete("/api/kb/{kb_id}")
 async def delete_kb(kb_id: str):
     kb_folder = os.path.join("vector_store", kb_id)
@@ -314,7 +350,7 @@ async def delete_kb(kb_id: str):
     return {"code": 400, "msg": f"知识库【{kb_id}】不存在"}
 
 
-@app.delete("/api/session/${session_id}")
+@app.delete("/api/session/{session_id}")
 async def delete_session_kb(session_id: str):
     kb_path = os.path.join("vector_store", session_id)
     if os.path.exists(kb_path):
