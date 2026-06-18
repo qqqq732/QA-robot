@@ -18,9 +18,10 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 # 本地多格式文件解析库
 import pdfplumber
 import pypdfium2 as pdfium
-from paddleocr import PaddleOCR
+import easyocr  
 from docx import Document as DocxDocument
 import openpyxl
+from pptx import Presentation  
 
 # 导入百炼原生 SDK 组件
 import dashscope
@@ -94,8 +95,8 @@ class ChatRequest(BaseModel):
     model_name: Optional[str] = "qwen-max"
 
 
-# 初始化 OCR 引擎
-ocr_engine = PaddleOCR(use_textline_orientation=True, lang="ch")
+print("正在初始化 EasyOCR 引擎...")
+ocr_engine = easyocr.Reader(['ch_sim', 'en'], gpu=False)
 
 
 # ==========================================
@@ -108,6 +109,7 @@ def extract_text_from_file(file_path: str, ext: str) -> str:
         if ext in [".txt", ".md"]:
             with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
                 text = f.read()
+
         elif ext == ".pdf":
             # 1. 先尝试用 pdfplumber 提取电子文本
             try:
@@ -117,48 +119,58 @@ def extract_text_from_file(file_path: str, ext: str) -> str:
                         if page_text:
                             text += page_text + "\n"
             except Exception as pdf_err:
-                print(f"pdfplumber 常规解析失败，尝试直接切入 OCR 模式: {pdf_err}")
+                print(f"pdfplumber 常规解析失败: {pdf_err}")
 
-                if len(text.strip()) < 10:
-                    print("检测到该 PDF 可能是图片扫描件，正在启动本地 OCR 引擎进行强力识别...")
-                    text = ""
+            if len(text.strip()) < 10:
+                print("检测到该 PDF 可能是图片扫描件，启动备用 EasyOCR 引擎进行识别...")
+                text = ""
 
-                    with pdfium.PdfDocument(file_path) as pdf_render:
-                        for i, page in enumerate(pdf_render):
-                            bitmap = page.render(scale=2)  
-                            pil_img = bitmap.to_pil().convert("RGB")  
+                with pdfium.PdfDocument(file_path) as pdf_render:
+                    for i, page in enumerate(pdf_render):
+                        print(f"--- 正在使用 EasyOCR 识别第 {i + 1} 页 ---")
+                        bitmap = page.render(scale=2)  # 放大2倍确保清晰度
+                        pil_img = bitmap.to_pil().convert("RGB")
+                        img_np = np.array(pil_img)
 
-                            import cv2
-                            img_np = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+                        # 使用 EasyOCR 提取文本
+                        result = ocr_engine.readtext(img_np, detail=0)
+                        if result:
+                            page_text = " ".join(result)
+                            text += page_text + "\n"
+                            print(f"第 {i + 1} 页识别成功，提取到 {len(page_text)} 个字。")
+                        else:
+                            print(f"⚠️ 警告：第 {i + 1} 页未识别到任何文字。")
 
-                            print(f"--- 正在识别第 {i + 1} 页 ---")
-                            result = ocr_engine.ocr(img_np)
-
-                            if result and result[0]:
-                                page_lines = 0
-                                for line in result[0]:
-                                    text += line[1][0] + " "
-                                    page_lines += 1
-                                print(f"第 {i + 1} 页识别成功，提取到 {page_lines} 行文字。")
-                            else:
-                                print(f"⚠️ 警告：第 {i + 1} 页未识别到任何文字，请检查图片内容是否清晰。")
-                            text += "\n"
-
-                    print(f"💡 本地 OCR 识别成功完成！总字数: {len(text)}")
+                print(f"💡 本地 OCR 识别成功完成！总字数: {len(text)}")
 
         elif ext == ".docx":
             doc = DocxDocument(file_path)
             for para in doc.paragraphs:
                 if para.text: text += para.text + "\n"
+
         elif ext == ".xlsx":
             wb = openpyxl.load_workbook(file_path)
             for sheet in wb.worksheets:
                 for row in sheet.iter_rows(values_only=True):
                     row_text = " ".join([str(cell) for cell in row if cell is not None])
                     if row_text.strip(): text += row_text + "\n"
+
+        elif ext in [".ppt", ".pptx"]:
+            print(f"正在解析 PPT 文件: {file_path}")
+            prs = Presentation(file_path)
+            for i, slide in enumerate(prs.slides):
+                slide_text = []
+                for shape in slide.shapes:
+                    if hasattr(shape, "text") and shape.text.strip():
+                        slide_text.append(shape.text.strip())
+                if slide_text:
+                    text += f"[第 {i + 1} 页幻灯片]\n" + "\n".join(slide_text) + "\n\n"
+            print(f"💡 PPT 解析成功！总字数: {len(text)}")
+
     except Exception as e:
         print(f"解析文件错误: {e}")
         traceback.print_exc()
+
     return text.strip()
 
 
@@ -279,6 +291,7 @@ async def chat_stream(request: ChatRequest):
                 messages.append({"role": m.role, "content": m.content})
             messages.append({"role": "user", "content": request.query})
 
+            # 💡 核心优化：百炼的 SDK 内部是同步阻塞 IO，使用 asyncio.to_thread 包裹使其兼容异步生成器
             responses = await asyncio.to_thread(
                 Generation.call,
                 model=current_model,
