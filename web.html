@@ -3,9 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <title>智能文档问答机器人</title>
-<!-- 引入 marked.js 用于 Markdown 渲染 -->
 <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-<!-- 引入 highlight.js 用于代码高亮 -->
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.7.0/styles/github.min.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.7.0/highlight.min.js"></script>
 
@@ -49,33 +47,21 @@ body{font-family:Microsoft YaHei,sans-serif;display:flex;height:100vh;overflow:h
 .user{margin-left:auto;background:#0b76ef;color:#fff;padding:12px 16px;border-radius:12px 12px 0 12px}
 .ai{margin-right:auto;background:#fff;color:#333;padding:12px 16px;border-radius:12px 12px 12px 0;box-shadow:0 1px 3px rgba(0,0,0,0.1)}
 
-/* 彻底修复：输入框区域完整、漂亮的原始样式 */
 .input-area{display:flex;padding:12px;border-top:1px solid #ddd;background:#fff;align-items:center}
 #query-input{flex:1;border:1px solid #ccc;border-radius:20px;padding:12px 18px;outline:none;font-size:15px}
 #send-btn{margin-left:10px;border:none;background:#0b76ef;color:#fff;padding:12px 20px;border-radius:20px;cursor:pointer;font-weight:bold}
 #send-btn:hover{background:#005ecb}
 
-/* Markdown 规范样式渲染 */
-.ai {
-    margin-right: auto;
-    background: #fff;
-    color: #333;
-    padding: 12px 16px;
-    border-radius: 12px 12px 12px 0;
-    box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-}
-
 .ai p { margin-bottom: 8px; display: block; line-height: 1.6; }
 .ai li { margin-bottom: 4px; line-height: 1.6; }
 .ai ol, .ai ul { margin: 6px 0; padding-left: 1.5em; }
-
-/* 标题样式 */
 .ai h1, .ai h2, .ai h3 { margin-top: 0.8em; margin-bottom: 0.4em; color: #111; }
-
-/* 行内代码与代码块样式 */
 .ai code { background: #f4f4f4; padding: 0.2em 0.4em; border-radius: 3px; font-family: monospace; font-size: 0.9em; }
 .ai pre { background: #f6f8fa; padding: 1em; border-radius: 6px; overflow-x: auto; margin: 1em 0; }
 .ai pre code { background: none; padding: 0; }
+
+/* 思考链统一样式 */
+.think-block { background: #f0f0f2; border-left: 3px solid #8e8e93; padding: 8px 12px; margin-bottom: 10px; color: #666; font-size: 13px; border-radius: 4px; }
 </style>
 </head>
 <body>
@@ -95,7 +81,7 @@ body{font-family:Microsoft YaHei,sans-serif;display:flex;height:100vh;overflow:h
       <button class="btn" id="newChatBtn">+ 新对话</button>
     </div>
     <button class="btn" id="uploadBtn">+添加知识库</button>
-    <input type="file" id="fileInput" accept=".txt,.md,.pdf,.docx,.xlsx">
+    <input type="file" id="fileInput" accept=".txt,.md,.pdf,.docx,.xlsx,.ppt,.pptx">
   </div>
 
   <div class="section-title">会话历史</div>
@@ -107,7 +93,6 @@ body{font-family:Microsoft YaHei,sans-serif;display:flex;height:100vh;overflow:h
 
 <div class="main">
   <div class="chat-container" id="chat-container"></div>
-
   <div class="input-area">
     <input type="text" id="query-input" placeholder="输入消息，回车发送...">
     <button id="send-btn">发送</button>
@@ -310,11 +295,20 @@ async function send(){
 
     const aiDiv = document.createElement("div");
     aiDiv.className = "message ai";
+
+    // 创建思考块和内容块
+    const thinkDiv = document.createElement("div");
+    thinkDiv.className = "think-block";
+    thinkDiv.style.display = "none";
+
     const contentDiv = document.createElement("div");
+
+    aiDiv.appendChild(thinkDiv);
     aiDiv.appendChild(contentDiv);
     document.getElementById("chat-container").appendChild(aiDiv);
 
     let fullContent = "";
+    let fullThink = "";
     let buffer = "";
 
     while(true){
@@ -331,24 +325,24 @@ async function send(){
         const dataText = line.substring(6);
         if(dataText === "[DONE]") break;
 
-        // 自动过滤纯思考链碎碎念
-        if(dataText.startsWith("<think>")) continue;
-
-        // 还原真实的换行符
-        const realChunk = dataText.replace(/\[BR\]/g, "\n");
-        fullContent += realChunk;
-
-        // 实时渲染
-        try {
-          contentDiv.innerHTML = marked.parse(fullContent);
-          contentDiv.querySelectorAll('pre code').forEach((b) => { hljs.highlightElement(b); });
-        } catch(e) {
-          contentDiv.innerHTML = fullContent;
+        if(dataText.startsWith("THINK:")) {
+            thinkDiv.style.display = "block";
+            const realChunk = dataText.substring(6).replace(/\[BR\]/g, "\n");
+            fullThink += realChunk;
+            thinkDiv.textContent = "🤔 思考过程：\n" + fullThink;
+        } else if(dataText.startsWith("TEXT:")) {
+            const realChunk = dataText.substring(5).replace(/\[BR\]/g, "\n");
+            fullContent += realChunk;
+            try {
+              contentDiv.innerHTML = marked.parse(fullContent);
+              contentDiv.querySelectorAll('pre code').forEach((b) => { hljs.highlightElement(b); });
+            } catch(e) {
+              contentDiv.innerHTML = fullContent;
+            }
         }
 
         document.getElementById("chat-container").scrollTop = document.getElementById("chat-container").scrollHeight;
       }
-
       await new Promise(resolve => requestAnimationFrame(resolve));
     }
 
